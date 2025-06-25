@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
-import fs from "fs/promises";
 import { Settings, TextNode, VectorStoreIndex } from "llamaindex";
 import { openai, OpenAIEmbedding } from "@llamaindex/openai";
 import { SimpleDirectoryReader } from "@llamaindex/readers/directory";
@@ -15,9 +14,6 @@ import {
 } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 
-
-
-
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -26,7 +22,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 5001;
 
 Settings.llm = openai({
-  apiKey: process.env.NEXT_PUBLIC_OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY,
   model: "gpt-4o",
 });
 
@@ -38,25 +34,30 @@ const memory = new BufferMemory({
   returnMessages: true,
 });
 const chatModel = new ChatOpenAI({
-  apiKey: process.env.NEXT_PUBLIC_OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY,
   model: "gpt-4o",
 });
 
-
 app.post("/query", async (req, res) => {
-  const { question } = req.body
+  const { question } = req.body;
 
   try {
-     // start query engine creation
-     const dataPath = path.join(process.cwd(), "data");
-     const documents = await new SimpleDirectoryReader().loadData({
-       directoryPath: dataPath,
-     });
-     const index = await VectorStoreIndex.fromDocuments(documents);
-     const queryEngine = index.asQueryEngine();
-     // end query engine creation
+    // query engine creation
+    const dataPath = path.join(process.cwd(), "data");
+    const documents = await new SimpleDirectoryReader().loadData({
+      directoryPath: dataPath,
+    });
+    const index = await VectorStoreIndex.fromDocuments(documents);
+    const queryEngine = index.asQueryEngine();
 
-     const chatPrompt = ChatPromptTemplate.fromMessages([
+    // Relevant nodes of context from document from querying the question to the engine
+    const receivedNodes = await queryEngine.retrieve({ query: question });
+    const contextText = receivedNodes
+      .map((item) => (item.node as TextNode).text)
+      .join("\n\n");
+
+    // Prompt for the AI to follow when having a chat. Takes in user input, previous chat history, and contextText.
+    const chatPrompt = ChatPromptTemplate.fromMessages([
       // chatTemplate
       [
         "system",
@@ -66,39 +67,24 @@ app.post("/query", async (req, res) => {
       ["human", "{input}"],
     ]);
 
-    const receivedNodes = await queryEngine.retrieve({ query: question });
-
-    const contextText = receivedNodes
-      .map((item) => (item.node as TextNode).text)
-      .join("\n\n");
-
-    const chatChain = RunnableSequence.from([
-      chatPrompt,
-      chatModel
-    ])
-
+    // Chain to invoke prompt and pass it to our llm. 
+    const chatChain = RunnableSequence.from([chatPrompt, chatModel]);
     const response = await chatChain.invoke({
       context: contextText,
       input: question,
-      chat_history: await memory.loadMemoryVariables({}).then(v => v.chat_history)
-    })
+      chat_history: await memory
+        .loadMemoryVariables({})
+        .then((v) => v.chat_history),
+    });
 
-    await memory.saveContext(
-      { input: question },
-      { output: response.content }
-    );
+    // saves the response and human question from chat into memory
+    await memory.saveContext({ input: question }, { output: response.content });
 
-    const { message } = await queryEngine.query({ query: question });
-
-    res.json({question: question, answer: message.content})
-    
+    res.json({ question: question, answer: response.content });
   } catch (error) {
     console.error("Query error:", error);
-    res.json({error})
-
+    res.json({ error });
   }
-
-  
 });
 
 app.listen(PORT, () => {
