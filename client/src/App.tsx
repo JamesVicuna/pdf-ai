@@ -1,6 +1,7 @@
 import "./App.css";
 import { useState, useEffect } from "react";
 import axios from "axios";
+import { PdfPreview } from "./components/PdfPreview";
 
 function App() {
 
@@ -29,13 +30,14 @@ function App() {
 
   return (
     <div>
-      <h1>hello world</h1>
+      {/* <h1>hello world</h1>
       {response && (
         <div>
           <p>{response.question}</p>
           <p>{response.answer}</p>
         </div>
-      )}
+      )} */}
+      <PdfPreview />
     </div>
   );
 }

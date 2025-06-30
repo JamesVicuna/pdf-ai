@@ -33,6 +33,7 @@ const memory = new BufferMemory({
   memoryKey: "chat_history",
   returnMessages: true,
 });
+// llm
 const chatModel = new ChatOpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   model: "gpt-4o",
