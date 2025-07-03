@@ -1,18 +1,27 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import path from "path";
-import { Settings, TextNode, VectorStoreIndex } from "llamaindex";
-import { openai, OpenAIEmbedding } from "@llamaindex/openai";
-import { SimpleDirectoryReader } from "@llamaindex/readers/directory";
+import multer from "multer";
 
+//LANGCHAIN
 import { BufferMemory } from "langchain/memory";
-import { ChatOpenAI } from "@langchain/openai";
+import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import {
   ChatPromptTemplate,
   MessagesPlaceholder,
+  PromptTemplate,
 } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
+import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
+import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+
+import pdfParse from "pdf-parse";
+import { v4 as uuidv4 } from "uuid";
+
+import { client } from "./db/supbase";
+import { vectorStore } from "./utils/vectorStore";
+import { combineDocuments } from "./utils/combineDocuments";
 
 dotenv.config();
 const app = express();
@@ -21,14 +30,15 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5001;
 
-Settings.llm = openai({
-  apiKey: process.env.OPENAI_API_KEY,
-  model: "gpt-4o",
-});
+// Settings.llm = openai({
+//   apiKey: process.env.OPENAI_API_KEY,
+//   model: "gpt-4o",
+// });
 
-Settings.embedModel = new OpenAIEmbedding();
+// Settings.embedModel = new OpenAIEmbedding();
 
 // langchain chatai settings
+const embeddings = new OpenAIEmbeddings({});
 const memory = new BufferMemory({
   memoryKey: "chat_history",
   returnMessages: true,
@@ -38,25 +48,73 @@ const chatModel = new ChatOpenAI({
   model: "gpt-4o",
 });
 
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
+app.post("/uploadPdf", upload.single("pdf"), async (req, res) => {
+  try {
+    const fileBuffer = req.file?.buffer;
+
+    if (!fileBuffer) {
+      res.status(400).json({ error: "No file uploaded" });
+      return;
+    }
+
+    const data = await pdfParse(fileBuffer);
+    const text = data.text;
+
+    const splitter = new RecursiveCharacterTextSplitter({});
+    const output = await splitter.createDocuments([text]);
+    const docId = uuidv4();
+
+    const documentsWithId = output.map((doc) => {
+      doc.metadata.docId = docId;
+      return doc;
+    });
+
+    await SupabaseVectorStore.fromDocuments(documentsWithId, embeddings, {
+      client: client(),
+      tableName: "documents",
+    });
+
+    res.status(200).json({ message: "PDF parsed", docId });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to parse PDF" });
+  }
+});
+
 app.post("/query", async (req, res) => {
-  const { question } = req.body;
+  const { question, docId } = req.body;
 
   try {
-    // query engine creation
-    const dataPath = path.join(process.cwd(), "data");
-    const documents = await new SimpleDirectoryReader().loadData({
-      directoryPath: dataPath,
+    const store = vectorStore(embeddings);
+    const retriever = store.asRetriever({
+      filter: {
+        docId: docId,
+      },
     });
-    const index = await VectorStoreIndex.fromDocuments(documents);
-    const queryEngine = index.asQueryEngine();
 
-    // Relevant nodes of context from document from querying the question to the engine
-    const receivedNodes = await queryEngine.retrieve({ query: question });
-    const contextText = receivedNodes
-      .map((item) => (item.node as TextNode).text)
-      .join("\n\n");
+    const standAloneQuestionTemplate =
+      "Given a question, convert it into a standalone question. question: {question} standalone_question:";
+    const standaloneQuestionPrompt = PromptTemplate.fromTemplate(
+      standAloneQuestionTemplate
+    );
 
-    // Prompt for the AI to follow when having a chat. Takes in user input, previous chat history, and contextText.
+    const standaloneQuestionChain = RunnableSequence.from([
+      standaloneQuestionPrompt,
+      new ChatOpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+        modelName: "gpt-4o",
+      }),
+      new StringOutputParser(),
+    ]);
+
+    const retrieverChain = RunnableSequence.from([
+      (prevResult) => prevResult.standalone_question,
+      retriever,
+      combineDocuments,
+    ]);
+
     const chatPrompt = ChatPromptTemplate.fromMessages([
       // chatTemplate
       [
@@ -67,20 +125,31 @@ app.post("/query", async (req, res) => {
       ["human", "{input}"],
     ]);
 
-    // Chain to invoke prompt and pass it to our llm. 
-    const chatChain = RunnableSequence.from([chatPrompt, chatModel]);
-    const response = await chatChain.invoke({
-      context: contextText,
-      input: question,
-      chat_history: await memory
-        .loadMemoryVariables({})
-        .then((v) => v.chat_history),
-    });
+    const chatChain = RunnableSequence.from([
+      chatPrompt,
+      chatModel,
+      new StringOutputParser(),
+    ]);
 
-    // saves the response and human question from chat into memory
-    await memory.saveContext({ input: question }, { output: response.content });
+    const chain = RunnableSequence.from([
+      { standalone_question: standaloneQuestionChain },
+      {
+        context: retrieverChain,
+        input: prevResult => prevResult.standalone_question,
+        chat_history: async () => {
+          const memoryVars = await memory.loadMemoryVariables({});
+          return memoryVars.chat_history;
+        }
+      },
+      chatChain,
+    ]);
 
-    res.json({ question: question, answer: response.content });
+    const response = await chain.invoke({ question });
+    await memory.saveContext({ input: question }, { output: response });
+
+    res.json({ input: question, output: response });
+
+    
   } catch (error) {
     console.error("Query error:", error);
     res.json({ error });
