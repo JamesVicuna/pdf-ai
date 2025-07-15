@@ -1,6 +1,0 @@
-Passing file into the query
-Using llamindex to index the file = getting relevant context 
- => indexing is basically chunking relevant data pertaining to our question
- Receiving those chunks of data and parsing into a single string
- Goes into our chat prompt with langchain
- OUr chat prompt has a template that uses the context from the indexing the file
