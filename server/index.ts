@@ -30,19 +30,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5001;
 
-// Settings.llm = openai({
-//   apiKey: process.env.OPENAI_API_KEY,
-//   model: "gpt-4o",
-// });
-
-// Settings.embedModel = new OpenAIEmbedding();
-
 // langchain chatai settings
 const embeddings = new OpenAIEmbeddings({});
 const memory = new BufferMemory({
   memoryKey: "chat_history",
   returnMessages: true,
 });
+// llm
 const chatModel = new ChatOpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   model: "gpt-4o",
@@ -77,7 +71,7 @@ app.post("/uploadPdf", upload.single("pdf"), async (req, res) => {
       tableName: "documents",
     });
 
-    res.status(200).json({ message: "PDF parsed", docId });
+    res.status(200).json({ message: "PDF parsed and embedded", docId });
   } catch (error) {
     res.status(500).json({ error: "Failed to parse PDF" });
   }
@@ -85,6 +79,7 @@ app.post("/uploadPdf", upload.single("pdf"), async (req, res) => {
 
 app.post("/query", async (req, res) => {
   const { question, docId } = req.body;
+  console.log({question, docId})
 
   try {
     const store = vectorStore(embeddings);
@@ -147,7 +142,7 @@ app.post("/query", async (req, res) => {
     const response = await chain.invoke({ question });
     await memory.saveContext({ input: question }, { output: response });
 
-    res.json({ input: question, output: response });
+    res.json({ output: response });
 
     
   } catch (error) {
